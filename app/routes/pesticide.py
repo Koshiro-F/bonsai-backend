@@ -7,16 +7,16 @@ bp = Blueprint('pesticide', __name__, url_prefix='/api/pesticides')
 
 # 定義済みの農薬リスト（必要に応じて拡張）
 PESTICIDE_LIST = [
-    {"id": 1, "name": "オルトラン", "description": "浸透移行性の殺虫剤", "default_dosage": "1g/L", "type": "殺虫剤"},
-    {"id": 2, "name": "スミチオン", "description": "有機リン系殺虫剤", "default_dosage": "2ml/L", "type": "殺虫剤"},
-    {"id": 3, "name": "ベニカ", "description": "殺虫殺菌剤", "default_dosage": "3ml/L", "type": "殺虫殺菌剤"},
-    {"id": 4, "name": "マラソン", "description": "有機リン系殺虫剤", "default_dosage": "2ml/L", "type": "殺虫剤"},
-    {"id": 5, "name": "カダン", "description": "浸透移行性の殺虫剤", "default_dosage": "5ml/L", "type": "殺虫剤"},
-    {"id": 6, "name": "トップジンM", "description": "殺菌剤", "default_dosage": "1g/L", "type": "殺菌剤"},
-    {"id": 7, "name": "石灰硫黄合剤", "description": "殺菌・殺虫剤", "default_dosage": "20ml/L", "type": "殺菌殺虫剤"},
-    {"id": 8, "name": "ダコニール", "description": "殺菌剤", "default_dosage": "2ml/L", "type": "殺菌剤"},
-    {"id": 9, "name": "バロック", "description": "殺虫剤", "default_dosage": "1ml/L", "type": "殺虫剤"},
-    {"id": 10, "name": "ダニ太郎", "description": "殺虫剤", "default_dosage": "1ml/L", "type": "殺虫剤"},
+    {"id": 1, "name": "オルトラン", "description": "浸透移行性の殺虫剤", "default_dosage": "1g/L", "type": "insecticide"},
+    {"id": 2, "name": "スミチオン", "description": "有機リン系殺虫剤", "default_dosage": "2ml/L", "type": "insecticide"},
+    {"id": 3, "name": "ベニカ", "description": "殺虫殺菌剤", "default_dosage": "3ml/L", "type": "insecticide"},
+    {"id": 4, "name": "マラソン", "description": "有機リン系殺虫剤", "default_dosage": "2ml/L", "type": "insecticide"},
+    {"id": 5, "name": "カダン", "description": "浸透移行性の殺虫剤", "default_dosage": "5ml/L", "type": "insecticide"},
+    {"id": 6, "name": "トップジンM", "description": "殺菌剤", "default_dosage": "1g/L", "type": "fungicide"},
+    {"id": 7, "name": "石灰硫黄合剤", "description": "殺菌・殺虫剤", "default_dosage": "20ml/L", "type": "fungicide"},
+    {"id": 8, "name": "ダコニール", "description": "殺菌剤", "default_dosage": "2ml/L", "type": "fungicide"},
+    {"id": 9, "name": "バロック", "description": "殺虫剤", "default_dosage": "1ml/L", "type": "insecticide"},
+    {"id": 10, "name": "ダニ太郎", "description": "殺虫剤", "default_dosage": "1ml/L", "type": "insecticide"},
 ]
 
 @bp.route('/list', methods=['GET'])
@@ -269,3 +269,60 @@ def remove_log(log_id):
         "message": "農薬記録を削除しました",
         "id": log_id
     })
+
+@bp.route('/enhanced-log', methods=['POST'])
+def add_enhanced_log():
+    """詳細な農薬使用記録を追加"""
+    user_id = request.args.get('user_id')
+    if not user_id:
+        return jsonify({"error": "ユーザーIDが必要です"}), 400
+    
+    data = request.json
+    if not data:
+        return jsonify({"error": "データが必要です"}), 400
+    
+    # 必須フィールドの確認
+    required_fields = ['bonsai_id', 'pesticide_name', 'usage_date']
+    for field in required_fields:
+        if field not in data:
+            return jsonify({"error": f"{field}が必要です"}), 400
+    
+    db = get_db(current_app)
+    
+    # 盆栽の所有者確認
+    bonsai = db.execute(
+        'SELECT * FROM bonsai WHERE id = ? AND user_id = ?',
+        (data['bonsai_id'], user_id)
+    ).fetchone()
+    
+    if not bonsai:
+        return jsonify({"error": "盆栽が見つからないか、アクセス権限がありません"}), 404
+    
+    try:
+        # 詳細記録をpesticide_logsテーブルに保存
+        db.execute('''
+            INSERT INTO pesticide_logs 
+            (bonsai_id, user_id, pesticide_name, date, amount, notes, 
+             water_amount, dilution_ratio)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            data['bonsai_id'],
+            user_id,
+            data['pesticide_name'],
+            data['usage_date'],
+            data.get('dosage', ''),
+            data.get('notes', ''),
+            data.get('water_amount', ''),
+            data.get('dilution_ratio', '')
+        ))
+        
+        db.commit()
+        log_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+        
+        return jsonify({
+            "message": "農薬記録を追加しました",
+            "log_id": log_id
+        }), 201
+        
+    except Exception as e:
+        return jsonify({"error": f"記録の追加に失敗しました: {str(e)}"}), 500
