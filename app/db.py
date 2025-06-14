@@ -10,7 +10,7 @@ def get_db(app=None):
     
     if 'db' not in g:
         g.db = sqlite3.connect(
-            os.path.join(app.instance_path, 'bonsai_users.db'),
+            os.path.join(app.instance_path, app.config['DATABASE']),
             detect_types=sqlite3.PARSE_DECLTYPES
         )
         g.db.row_factory = sqlite3.Row
@@ -72,6 +72,22 @@ def init_db():
             filename TEXT NOT NULL,
             original_filename TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS work_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bonsai_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            work_type TEXT NOT NULL CHECK (work_type IN ('剪定', '植え替え', '針金掛け', '針金外し', '水やり', '肥料', '植え替え準備', 'その他')),
+            description TEXT,
+            notes TEXT,
+            duration INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (bonsai_id) REFERENCES bonsai (id),
+            FOREIGN KEY (user_id) REFERENCES users (id)
         )
     ''')
     
