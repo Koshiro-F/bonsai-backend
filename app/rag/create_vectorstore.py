@@ -9,12 +9,16 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from unstructured.partition.pdf import partition_pdf
+from google.cloud import documentai
+import pdf_chunking
 
-load_dotenv(dotenv_path=".env.local")
+load_dotenv(dotenv_path="/home/fujikawa/jinshari/flask-bonsai/.env.local")
+# 環境変数の設定
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/home/fujikawa/.config/gcloud/application_default_credentials.json"
 
-FOLDER_PATH = "/root/workspaces/rag-streamlit-orion/data/input/"
-PROCESSED_FILES_TXT = "/root/workspaces/rag-streamlit-orion/data/processed_files.txt"
-VECTORSTORE_PATH = "/root/workspaces/rag-streamlit-orion/data/vectorstore"
+FOLDER_PATH = "/home/fujikawa/jinshari/flask-bonsai/data/input/"
+PROCESSED_FILES_TXT = "/home/fujikawa/jinshari/flask-bonsai/data/processed_files.txt"
+VECTORSTORE_PATH = "/home/fujikawa/jinshari/flask-bonsai/data/vectorstore"
 
 
 class CreateVectorstore:
@@ -61,40 +65,40 @@ class CreateVectorstore:
             self.vectorstore.persist()
 
     def process_pdf(self, file):
-        # Get Elements
-        raw_pdf_elements = partition_pdf(
-            filename=FOLDER_PATH + file,
-            languages=["jpn", "eng"],
-            strategy="hi_res",
-            extract_images_in_pdf=True,
-            extract_image_block_types=["Image", "Table"],
-            extract_image_block_to_payload=True,
-            infer_table_structure=True,
-        )
-
-        images = []
-        texts = []
-
-        el_dict_list = [el.to_dict() for el in raw_pdf_elements]
-
-        for i, el in enumerate(el_dict_list):
-            not_table_title = True
-            if i < len(el_dict_list) - 1:
-                if el["type"] == "Title" and el_dict_list[i + 1]["type"] == "Table":
-                    el_dict_list[i + 1]["text"] = (
-                        el["text"] + "\n" + el_dict_list[i + 1]["text"]
-                    )
-                    not_table_title = False
-            if el["type"] in ["Image", "Table"]:
-                images.append(el)
-            elif not_table_title:
-                texts.append(el)
-
-        images = self.del_small_images(images)
-
-        texts = self.merge_texts(texts, FOLDER_PATH, file)
-
+        # DocumentAI documentを取得
+        document = self.get_documentai_document(file)
+        base_metadata = {
+            "source_file": FOLDER_PATH + file,
+            "filename": file,
+        }
+        # チャンク抽出・結合
+        chunks = pdf_chunking.extract_document_chunks(document, base_metadata)
+        # 距離閾値を30pxに拡大
+        chunks = pdf_chunking.merge_paragraph_chunks(chunks, max_distance=30, max_chars_per_chunk=1500)
+        # 3文字以下の短いチャンクを除去
+        chunks = [c for c in chunks if len(c["text"].strip()) > 3]
+        # 画像・表要素は従来通り抽出
+        images = [c for c in chunks if c["metadata"]["chunk_type"] in ["Image", "Table"]]
+        texts = [c for c in chunks if c["metadata"]["chunk_type"] == "paragraph" or c["metadata"]["chunk_type"] == "merged_paragraph"]
         return images, texts
+
+    def get_documentai_document(self, file):
+        # test.pyのprocess_documentを参考にDocumentAI documentを取得
+        project_id = "utopian-saga-466802-m5"
+        location = "us"
+        processor_id = "e794632016082b0"
+        processor_version = "pretrained-ocr-v2.0-2023-06-02"
+        mime_type = "application/pdf"
+        client = documentai.DocumentProcessorServiceClient()
+        name = client.processor_version_path(project_id, location, processor_id, processor_version)
+        with open(FOLDER_PATH + file, "rb") as image:
+            image_content = image.read()
+        request = documentai.ProcessRequest(
+            name=name,
+            raw_document=documentai.RawDocument(content=image_content, mime_type=mime_type),
+        )
+        result = client.process_document(request=request)
+        return result.document
 
     def del_small_images(self, images, max_kb=30):
         over_max_kb_image_list = []
@@ -192,8 +196,7 @@ class CreateVectorstore:
                     Document(
                         page_content=chunk["text"],
                         metadata={
-                            "type": chunk["type"],
-                            "file_directory": chunk["metadata"]["file_directory"],
+                            "type": chunk["metadata"]["chunk_type"],
                             "filename": chunk["metadata"]["filename"],
                             "page_number": chunk["metadata"]["page_number"],
                             "image_base64": "",
@@ -216,11 +219,11 @@ class CreateVectorstore:
                     Document(
                         page_content=image["summary"],
                         metadata={
-                            "type": "Image",
+                            "type": image["metadata"]["chunk_type"] if "chunk_type" in image["metadata"] else "Image",
                             "file_directory": image["metadata"]["file_directory"],
                             "filename": image["metadata"]["filename"],
                             "page_number": image["metadata"]["page_number"],
-                            "image_base64": image["metadata"]["image_base64"],
+                            "image_base64": image["metadata"].get("image_base64", ""),
                         },
                     )
                 ]

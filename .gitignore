@@ -11,6 +11,7 @@ instance/
 
 # Environment variables
 .env
+.env.local
 .venv
 env/
 venv/
@@ -32,3 +33,5 @@ Thumbs.db
 flask-bonsai.log
 cloudflared.log
 flask.log 
+
+data/
