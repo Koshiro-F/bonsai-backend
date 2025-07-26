@@ -10,7 +10,7 @@
     - が、足りない可能性が大いにあります
 
 ### instanceのインポート
-Googleドライブから```instance.zip```をダウンロードして解凍し、中身のフォルダをディレクトリ直下に配置してください
+[Googleドライブ](https://drive.google.com/drive/folders/1H3vB7fSie3MDJ-JJliAOFDR5kdyhy7fx)から```instance.zip```をダウンロードして解凍し、中身のフォルダをディレクトリ直下に配置してください
 
 中身は2025.7.26時点でのDB（SQLite）と生画像データです
 
@@ -22,8 +22,8 @@ Googleドライブから```instance.zip```をダウンロードして解凍し�
 ```
 python run.py
 ```
-
-## RAGの実行まで
+---
+## RAGの実行まで(実験中)
 1. ディレクトリ直下にdataフォルダを作成します
 2. data/input/を作成し、中に処理したいPDFを入れます
 3. 以下のコマンドで```create_vectorstore.py```を実行します。ここまでがデータベースの準備です
