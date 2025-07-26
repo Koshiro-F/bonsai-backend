@@ -1,6 +1,36 @@
+# Flask関連
 Flask>=2.0.0
 flask-cors>=3.0.0
 Werkzeug>=2.0.0
+
+# CLI関連
 click>=8.0.0
+
+# 環境変数管理
 python-dotenv>=0.19.0
+
+# 画像処理
 Pillow>=9.0.0
+
+# AI/ML関連
+openai>=1.0.0
+langchain>=0.1.0
+langchain-openai>=0.1.0
+langchain-community>=0.1.0
+chromadb>=0.4.0
+
+# Google Cloud関連
+google-cloud-documentai>=2.0.0
+google-api-core>=2.0.0
+
+# PDF処理関連
+unstructured[pdf]>=0.10.0
+PyMuPDF>=1.23.0
+pdfplumber>=0.9.0
+pdfminer.six>=20220524
+
+# データ処理・型注釈
+typing-extensions>=4.0.0
+
+# HTTP クライアント（テスト用）
+requests>=2.28.0
