@@ -16,8 +16,10 @@ from google.cloud import documentai
 import fitz  # PyMuPDF
 
 
-# 環境変数の読み込み
-load_dotenv(dotenv_path="/Users/fujikawaakirashirou/jinshari/bonsai-backend/.env.local")
+# 環境変数の読み込み（スクリプト位置からの相対パスで解決）
+_BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
+_ENV_PATH = os.path.join(_BASE_DIR, ".env.local")
+load_dotenv(dotenv_path=_ENV_PATH)
 
 
 class OCRPageExporter:
