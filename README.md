@@ -32,7 +32,7 @@ python run.py
     ```
     1. 現状、Google Cloudのアカウントを作成しログインする必要のあるサービスを使っています
 
-    2. 共同で使えるものを準備します。少々お待ちを
+    2. 下で作成することになっている```.env.local```の中に、”GOOGLE_APPLICATION_CREDENTIALS"として認証JSONのパスを指定してください
 
 4. ディレクトリ直下に```.env.local```を作成し、その中に"OPENAI_API_KEY"を入れます
     1. これもOpenAIに課金する必要があります。共有の方法を考えます
