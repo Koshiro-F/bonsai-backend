@@ -223,11 +223,11 @@ def main():
 
     parser = argparse.ArgumentParser(description="DocumentAI OCR → ページ別CSVエクスポート")
     parser.add_argument("--output", "-o",
-                        default="/Users/fujikawaakirashirou/jinshari/bonsai-backend/data/ocr_pages.csv",
+                        default=_BASE_DIR + "/data/ocr_pages.csv",
                         help="出力CSVファイルのパス")
     parser.add_argument("--spec", action="append", required=True,
                         help="処理対象指定: 'filename.pdf:1,3-5,10' の形式。複数指定可。相対パスは--base-dir基準")
-    parser.add_argument("--base-dir", default="/Users/fujikawaakirashirou/jinshari/bonsai-backend/data/input",
+    parser.add_argument("--base-dir", default=_BASE_DIR + "/data/input",
                         help="--specで相対パスを解決する基準ディレクトリ")
 
     args = parser.parse_args()
