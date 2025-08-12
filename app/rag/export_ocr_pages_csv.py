@@ -25,13 +25,15 @@ load_dotenv(dotenv_path=_ENV_PATH)
 class OCRPageExporter:
     """DocumentAIを使ってPDFからページ単位のテキストを抽出してCSV保存する"""
 
-    def __init__(self):
+    def __init__(self, imageless: bool = True):
         # DocumentAI設定
         self.project_id = "utopian-saga-466802-m5"
         self.location = "us"
         self.processor_id = "e794632016082b0"
         self.processor_version = "pretrained-ocr-v2.0-2023-06-02"
         self.client = documentai.DocumentProcessorServiceClient()
+        # 画像抽出を省略するimagelessモード（ページ上限の緩和を狙う）。
+        self.imageless = imageless
 
     def _get_documentai_document(self, pdf_path: str):
         """DocumentAIでPDFを処理し、documentを返す"""
@@ -42,10 +44,30 @@ class OCRPageExporter:
         with open(pdf_path, "rb") as pdf_file:
             pdf_content = pdf_file.read()
 
-        request = documentai.ProcessRequest(
-            name=name,
-            raw_document=documentai.RawDocument(content=pdf_content, mime_type="application/pdf"),
-        )
+        # imagelessモード指定（利用可能な場合）。失敗時は通常オプションで再試行。
+        request = None
+        if self.imageless:
+            try:
+                request = documentai.ProcessRequest(
+                    name=name,
+                    raw_document=documentai.RawDocument(content=pdf_content, mime_type="application/pdf"),
+                    process_options=documentai.ProcessOptions(
+                        # 画像関連抽出を無効化（imageless相当）
+                        enable_image_extraction=False,
+                        # ネイティブPDFパースを有効化
+                        ocr_config=documentai.OcrConfig(
+                            enable_native_pdf_parsing=True
+                        )
+                    )
+                )
+            except Exception:
+                request = None
+
+        if request is None:
+            request = documentai.ProcessRequest(
+                name=name,
+                raw_document=documentai.RawDocument(content=pdf_content, mime_type="application/pdf"),
+            )
 
         result = self.client.process_document(request=request)
         return result.document
@@ -120,7 +142,10 @@ class OCRPageExporter:
         return {"x1": min(x_coords), "y1": min(y_coords), "x2": max(x_coords), "y2": max(y_coords)}
 
     def _extract_page_content(self, document, page_index: int) -> str:
-        """指定ページの内容テキストをレイアウト順にまとめて返す"""
+        """指定ページの内容テキストをまとめて返す。
+        カラム推定は行わず、要素は y（上→下）で行グループ化し、
+        同一行では x（右→左）に整列。段落はユークリッド距離で結合。
+        """
         if page_index >= len(document.pages):
             return ""
         page = document.pages[page_index]
@@ -132,10 +157,11 @@ class OCRPageExporter:
             for para in page.paragraphs:
                 text = self._extract_text_from_layout(para.layout, document.text)
                 if text.strip():
+                    bbox = self._extract_bbox(para.layout)
                     elements.append({
                         "type": "paragraph",
                         "text": text.strip(),
-                        "bbox": self._extract_bbox(para.layout)
+                        "bbox": bbox
                     })
 
         # 表
@@ -150,18 +176,107 @@ class OCRPageExporter:
                         "bbox": bbox
                     })
 
-        # レイアウト順にソート (y1 -> x1)
-        elements.sort(key=lambda x: (x["bbox"].get("y1", 0), x["bbox"].get("x1", 0)))
+        if not elements:
+            return ""
 
-        # テキスト整形
-        lines: List[str] = []
+        # ページサイズの推定（閾値設定のため）
+        min_x = min(el["bbox"].get("x1", 0) for el in elements)
+        max_x = max(el["bbox"].get("x2", 0) for el in elements)
+        min_y = min(el["bbox"].get("y1", 0) for el in elements)
+        max_y = max(el["bbox"].get("y2", 0) for el in elements)
+        page_width = max(1.0, max_x - min_x)
+        page_height = max(1.0, max_y - min_y)
+        page_diag = (page_width ** 2 + page_height ** 2) ** 0.5
+
+        # y座標を離散化（許容誤差内の要素は同じ行として扱う）
+        def y_center(b):
+            return (b.get("y1", 0) + b.get("y2", 0)) / 2.0
+
+        y_tolerance = page_height * 0.1  # ほぼ同じ高さとみなす許容範囲（1%）
+
+        # まずy中心でソート
+        elements.sort(key=lambda x: (y_center(x["bbox"]), x["bbox"].get("x1", 0)))
+
+        # グルーピング: 近いy（±y_tolerance）を同じ行グループにまとめる
+        row_groups: List[List[Dict]] = []
+        current_group: List[Dict] = []
+        current_y: Optional[float] = None
+
         for el in elements:
-            if el["type"] == "table":
+            yc = y_center(el["bbox"]) if el.get("bbox") else 0
+            if current_group and current_y is not None and abs(yc - current_y) <= y_tolerance:
+                current_group.append(el)
+                # 代表yは初期値を維持（ドリフト防止）
+            else:
+                if current_group:
+                    row_groups.append(current_group)
+                current_group = [el]
+                current_y = yc
+        if current_group:
+            row_groups.append(current_group)
+
+        # 各行グループ内をxで降順ソートし、行グループ順にフラット化（上→下、同じ行は右→左）
+        for g in row_groups:
+            g.sort(key=lambda e: e["bbox"].get("x1", 0), reverse=True)
+        elements = [e for g in row_groups for e in g]
+
+        # ユークリッド距離の閾値（ページ対角の割合）
+        distance_threshold = page_diag * 0.1  # 10% 程度
+
+        def center(b):
+            return ((b.get("x1", 0) + b.get("x2", 0)) / 2.0,
+                    (b.get("y1", 0) + b.get("y2", 0)) / 2.0)
+
+        def euclid(b1, b2) -> float:
+            x1, y1 = center(b1)
+            x2, y2 = center(b2)
+            dx, dy = (x2 - x1), (y2 - y1)
+            return (dx * dx + dy * dy) ** 0.5
+
+        merged: List[Dict] = []
+        current_block: Optional[Dict] = None
+
+        for item in elements:
+            if item["type"] == "table":
+                # 表は独立ブロックとして配置、段落結合はリセット
+                if current_block:
+                    merged.append(current_block)
+                    current_block = None
+                merged.append(item)
+                continue
+
+            # paragraph
+            if current_block is None:
+                current_block = {"type": "paragraph", "text": item["text"], "bbox": item["bbox"]}
+                continue
+
+            dist = euclid(current_block["bbox"], item["bbox"]) if current_block else 1e9
+            if dist <= distance_threshold:
+                # 近い段落は結合（単純結合）
+                current_block["text"] = current_block["text"].rstrip() + "\n" + item["text"].lstrip()
+                # bboxの統合
+                cb = current_block["bbox"]
+                ib = item["bbox"]
+                cb["x1"] = min(cb.get("x1", 0), ib.get("x1", 0))
+                cb["y1"] = min(cb.get("y1", 0), ib.get("y1", 0))
+                cb["x2"] = max(cb.get("x2", 0), ib.get("x2", 0))
+                cb["y2"] = max(cb.get("y2", 0), ib.get("y2", 0))
+            else:
+                merged.append(current_block)
+                current_block = {"type": "paragraph", "text": item["text"], "bbox": item["bbox"]}
+
+        if current_block:
+            merged.append(current_block)
+
+        # 出力整形
+        lines: List[str] = []
+        for block in merged:
+            if block["type"] == "table":
                 lines.append("**表形式データ**:")
-                lines.append(el["text"])  # そのまま複数行
+                lines.append(block["text"])  # そのまま複数行
                 lines.append("")
             else:
-                lines.append(el["text"])
+                lines.append(block["text"])  # 結合済み段落
                 lines.append("")
 
         return "\n".join(lines).strip()
@@ -174,37 +289,55 @@ class OCRPageExporter:
         print(f"📖 OCR処理: {os.path.basename(pdf_path)}")
         results: List[Dict[str, str]] = []
 
-        if selected_pages:
-            # 0始まりに変換（元PDFの総ページ数を知らなくてもよい）
-            zero_based = sorted({p - 1 for p in selected_pages if p >= 1})
-            if not zero_based:
-                print(f"  ⚠️ 指定ページが不正のためスキップ: {os.path.basename(pdf_path)}")
-                return results
-            # 指定ページのみで一時PDFを作成してDocumentAIに渡す（サイズ制限対策）
-            document, original_page_numbers = self._process_selected_pages_with_documentai(pdf_path, zero_based)
-            total_pages_tmp = len(document.pages)
-            print(f"  🔢 指定ページ: {', '.join(str(p) for p in sorted(selected_pages))} → 抽出{total_pages_tmp}ページ")
+        # ページバッチング（imageless時30/非imageless時15）
+        def batched(lst: List[int], size: int) -> List[List[int]]:
+            return [lst[i:i + size] for i in range(0, len(lst), size)]
 
-            for tmp_idx in range(total_pages_tmp):
+        if selected_pages:
+            zero_based_all = sorted({p - 1 for p in selected_pages if p >= 1})
+        else:
+            # 全ページ指定: 元PDFからページ数を取得
+            with fitz.open(pdf_path) as doc:
+                zero_based_all = list(range(len(doc)))
+
+        if not zero_based_all:
+            print(f"  ⚠️ 指定ページが不正のためスキップ: {os.path.basename(pdf_path)}")
+            return results
+
+        batch_limit = 30 if self.imageless else 15
+        for batch in batched(zero_based_all, batch_limit):
+            try:
+                document, original_page_numbers = self._process_selected_pages_with_documentai(pdf_path, batch)
+            except Exception as e:
+                msg = str(e)
+                # imagelessが効いていない場合のフォールバック: 15ページに再分割
+                if self.imageless and ("PAGE_LIMIT_EXCEEDED" in msg or "non-imageless" in msg or "page limit" in msg.lower()):
+                    fallback_limit = 15
+                    print(f"  ⚠️ imageless未適用の可能性。{fallback_limit}ページに再分割して再試行します。")
+                    for small in batched(batch, fallback_limit):
+                        document, original_page_numbers = self._process_selected_pages_with_documentai(pdf_path, small)
+                        print(f"  🔁 再試行: {len(small)}ページ")
+                        for tmp_idx in range(len(document.pages)):
+                            orig_page_num = original_page_numbers[tmp_idx]
+                            print(f"    📄 ページ {orig_page_num} を抽出中...")
+                            content = self._extract_page_content(document, tmp_idx)
+                            results.append({
+                                "filename": os.path.basename(pdf_path),
+                                "page": str(orig_page_num),
+                                "content": content,
+                            })
+                    continue
+                else:
+                    raise
+
+            print(f"  🔢 ページバッチ処理: {len(batch)}ページ (上限 {batch_limit})")
+            for tmp_idx in range(len(document.pages)):
                 orig_page_num = original_page_numbers[tmp_idx]
-                print(f"  📄 ページ {orig_page_num} を抽出中...")
+                print(f"    📄 ページ {orig_page_num} を抽出中...")
                 content = self._extract_page_content(document, tmp_idx)
                 results.append({
                     "filename": os.path.basename(pdf_path),
                     "page": str(orig_page_num),
-                    "content": content,
-                })
-        else:
-            # 全ページ処理（ファイルが大きすぎる場合はユーザーが--specで範囲指定推奨）
-            document = self._get_documentai_document(pdf_path)
-            total_pages = len(document.pages)
-            for idx in range(total_pages):
-                page_num = idx + 1
-                print(f"  📄 ページ {page_num}/{total_pages} を抽出中...")
-                content = self._extract_page_content(document, idx)
-                results.append({
-                    "filename": os.path.basename(pdf_path),
-                    "page": str(page_num),
                     "content": content,
                 })
         return results
@@ -229,10 +362,14 @@ def main():
                         help="処理対象指定: 'filename.pdf:1,3-5,10' の形式。複数指定可。相対パスは--base-dir基準")
     parser.add_argument("--base-dir", default=_BASE_DIR + "/data/input",
                         help="--specで相対パスを解決する基準ディレクトリ")
+    parser.add_argument("--imageless", dest="imageless", action="store_true", default=True,
+                        help="imagelessモードを有効化（ページ上限の緩和）。デフォルト: 有効")
+    parser.add_argument("--no-imageless", dest="imageless", action="store_false",
+                        help="imagelessモードを無効化（画像抽出も含む）")
 
     args = parser.parse_args()
 
-    exporter = OCRPageExporter()
+    exporter = OCRPageExporter(imageless=args.imageless)
 
     def parse_pages(pages_str: str) -> Set[int]:
         pages: Set[int] = set()
