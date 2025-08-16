@@ -1,6 +1,9 @@
 # ベクトルストアを使用したインタラクティブAIチャット
 import json
+import os
+import time
 from typing import List, Tuple
+from dataclasses import dataclass
 
 from dotenv import load_dotenv
 from langchain.prompts import ChatPromptTemplate
@@ -9,15 +12,93 @@ from langchain_community.retrievers import BM25Retriever
 from langchain_community.vectorstores import Chroma
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
-load_dotenv(dotenv_path="/home/fujikawa/jinshari/flask-bonsai/.env.local")
+# スクリプトファイルの位置を基準にパスを計算（カレントディレクトリに依存しない）
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+BACKEND_ROOT = os.path.join(SCRIPT_DIR, "..", "..")
+ENV_PATH = os.path.join(BACKEND_ROOT, ".env.local")
 
-TOP_K = 5
+load_dotenv(dotenv_path=ENV_PATH)
 
-VECTORSTORE_PATH = "/home/fujikawa/jinshari/flask-bonsai/data/vectorstore"
+TOP_K = 3
+BM25_K = 2  # BM25検索の取得数
+VECTOR_K = 2  # ベクトル検索の取得数
+
+VECTORSTORE_PATH = os.path.join(BACKEND_ROOT, "data", "vectorstore_page_unified")
+
+# OpenAI API料金設定（2024年1月現在）
+PRICING = {
+    "gpt-4o": {"input": 0.00250, "output": 0.01000},  # per 1K tokens
+    "gpt-4o-mini": {"input": 0.00015, "output": 0.00060},  # per 1K tokens
+    "gpt-4.1-nano": {"input": 0.0001, "output": 0.00040},  # gpt-4o-miniと同等と仮定
+    "text-embedding-ada-002": {"input": 0.00010, "output": 0.0}  # per 1K tokens
+}
+
+@dataclass
+class TokenUsage:
+    """トークン使用量を追跡するクラス"""
+    model: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost: float = 0.0
+    
+    def add_usage(self, input_tokens: int, output_tokens: int = 0):
+        """使用量を追加し、コストを計算"""
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+        
+        if self.model in PRICING:
+            pricing = PRICING[self.model]
+            self.cost = (self.input_tokens * pricing["input"] + 
+                        self.output_tokens * pricing["output"]) / 1000
+    
+    def __str__(self):
+        return f"{self.model}: {self.input_tokens}in + {self.output_tokens}out = ${self.cost:.6f}"
+
+class TokenTracker:
+    """API使用量を追跡するクラス"""
+    def __init__(self):
+        self.session_usage = {}
+        self.total_usage = {}
+        self.start_time = time.time()
+    
+    def track_usage(self, model: str, input_tokens: int, output_tokens: int = 0):
+        """使用量を記録"""
+        if model not in self.session_usage:
+            self.session_usage[model] = TokenUsage(model)
+            self.total_usage[model] = TokenUsage(model)
+        
+        self.session_usage[model].add_usage(input_tokens, output_tokens)
+        self.total_usage[model].add_usage(input_tokens, output_tokens)
+    
+    def get_session_summary(self) -> str:
+        """セッション全体の使用量サマリーを取得"""
+        if not self.session_usage:
+            return "📊 トークン使用量: なし"
+        
+        summary = ["📊 セッション使用量:"]
+        total_cost = 0.0
+        
+        for model, usage in self.session_usage.items():
+            summary.append(f"  {usage}")
+            total_cost += usage.cost
+        
+        duration = time.time() - self.start_time
+        summary.append(f"  合計コスト: ${total_cost:.6f}")
+        summary.append(f"  セッション時間: {duration:.1f}秒")
+        
+        return "\n".join(summary)
+    
+    def get_query_summary(self, model: str, input_tokens: int, output_tokens: int = 0) -> str:
+        """クエリ単位の使用量サマリーを取得"""
+        if model in PRICING:
+            pricing = PRICING[model]
+            cost = (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1000
+            return f"💰 {model}: {input_tokens}in + {output_tokens}out = ${cost:.6f}"
+        return f"💰 {model}: {input_tokens}in + {output_tokens}out"
 
 
 class RAGChatBot:
-    def __init__(self, show_content=False):
+    def __init__(self, show_content=False, track_tokens=True):
         print("ベクトルストアを読み込み中...")
         self.embeddings = OpenAIEmbeddings(
             model="text-embedding-ada-002",
@@ -34,9 +115,10 @@ class RAGChatBot:
             self.documents["documents"],
             metadatas=self.documents["metadatas"],
             preprocess_func=self.preprocess_func,
+            k=BM25_K  # BM25検索の結果数を明示的に指定
         )
         self.vector_retriever = self.vectorstore.as_retriever(
-            search_kwargs={"k": TOP_K}
+            search_kwargs={"k": VECTOR_K}  # ベクトル検索の結果数を指定
         )
         self.system_message = (
             """あなたは盆栽の専門家です。以下に与えられた盆栽の専門文書のデータに基づいて、ユーザーの質問に対して回答を生成してください。
@@ -49,7 +131,13 @@ class RAGChatBot:
         self.chat_history = []
         self.show_content = show_content
         
+        # トークン追跡機能
+        self.track_tokens = track_tokens
+        self.token_tracker = TokenTracker() if track_tokens else None
+        
         print("チャットボットの準備が完了しました！")
+        if track_tokens:
+            print("💰 トークン使用量追跡: 有効")
 
     def main(self):
         print("=" * 50)
@@ -57,19 +145,31 @@ class RAGChatBot:
         print("=" * 50)
         print("質問を入力してください。終了するには 'quit', 'exit', 'q' を入力してください。")
         print("履歴をクリアするには 'clear' を入力してください。")
+        if self.track_tokens:
+            print("トークン使用量を確認するには 'tokens' を入力してください。")
         print("-" * 50)
         print("参照ドキュメントの内容も表示する: {}".format("ON" if self.show_content else "OFF"))
+        if self.track_tokens:
+            print("トークン使用量追跡: ON")
         
         while True:
             try:
                 user_input = input("\nあなた: ").strip()
                 
                 if user_input.lower() in ['quit', 'exit', 'q']:
+                    if self.track_tokens and self.token_tracker:
+                        print("\n" + self.token_tracker.get_session_summary())
                     print("チャットを終了します。")
                     break
                 elif user_input.lower() == 'clear':
                     self.chat_history = []
                     print("会話履歴をクリアしました。")
+                    continue
+                elif user_input.lower() == 'tokens' and self.track_tokens:
+                    if self.token_tracker:
+                        print("\n" + self.token_tracker.get_session_summary())
+                    else:
+                        print("トークン追跡が無効です。")
                     continue
                 elif not user_input:
                     print("質問を入力してください。")
@@ -148,16 +248,50 @@ class RAGChatBot:
     ):
         question = self.regenerate_question(user_input)
         keyword_searched = keyword_retriever.invoke(question)
+        
+        # ベクトル検索でのembedding使用量を追跡
+        if self.track_tokens and self.token_tracker:
+            # クエリのembedding作成コスト
+            query_tokens = len(question) // 4  # 大まかな推定
+            self.token_tracker.track_usage("text-embedding-ada-002", query_tokens, 0)
+            print(f"    {self.token_tracker.get_query_summary('text-embedding-ada-002', query_tokens, 0)}")
+        
         vector_searched = vector_retriever.invoke(question)
+        
+        # 重複除去とTOP_K個への制限
+        unique_docs = []
+        seen_contents = set()
+        
+        # ベクトル検索結果を優先して追加
+        for doc in vector_searched:
+            content_hash = hash(doc.page_content)
+            if content_hash not in seen_contents and len(unique_docs) < TOP_K:
+                unique_docs.append(doc)
+                seen_contents.add(content_hash)
+        
+        # 残りの枠をBM25検索結果で埋める
+        for doc in keyword_searched:
+            content_hash = hash(doc.page_content)
+            if content_hash not in seen_contents and len(unique_docs) < TOP_K:
+                unique_docs.append(doc)
+                seen_contents.add(content_hash)
+        
+        # 最終的にTOP_K個に制限
+        final_docs = unique_docs[:TOP_K]
+        
         texts_retrieved = []
         metadata_list = []
-        referenced_docs = []  # 参照したドキュメントを保持
-        for doc in vector_searched + keyword_searched:
+        referenced_docs = []
+        
+        for doc in final_docs:
             texts_retrieved.append(doc.page_content)
             metadata_list.append(doc.metadata)
-            referenced_docs.append(doc)  # Document オブジェクトを保持
+            referenced_docs.append(doc)
+        
+        print(f"🔍 検索結果: ベクトル{len(vector_searched)}件 + BM25 {len(keyword_searched)}件 → 重複除去後{len(final_docs)}件")
+        
         result = self.chat_based_on_texts(texts_retrieved, question, system_message)
-        return result, metadata_list, referenced_docs  # referenced_docsも返す
+        return result, metadata_list, referenced_docs
 
     def regenerate_question(self, user_input):
         """
@@ -180,7 +314,21 @@ class RAGChatBot:
         chain = prompt | self.llm
         follow_up_question = user_input
         args = {"chat_history": self.chat_history, "follow_up_question": follow_up_question}
+        
+        # トークン使用量を追跡
+        if self.track_tokens and self.token_tracker:
+            # 入力トークンの概算（正確には取得困難なので推定）
+            input_text = str(self.chat_history) + follow_up_question
+            estimated_input_tokens = len(input_text) // 4  # 大まかな推定
+            
         ans = chain.invoke(args)
+        
+        # トークン使用量を記録（推定値）
+        if self.track_tokens and self.token_tracker:
+            output_tokens = len(str(ans.content)) // 4  # 大まかな推定
+            self.token_tracker.track_usage("gpt-4.1-nano", estimated_input_tokens, output_tokens)
+            print(f"    {self.token_tracker.get_query_summary('gpt-4.1-nano', estimated_input_tokens, output_tokens)}")
+            
         return str(ans.content)
 
     def chat_based_on_texts(self, texts_retrieved, question, system_message):
@@ -203,9 +351,22 @@ class RAGChatBot:
             質問: {question}
             """
 
-        return self.llm.invoke(
+        # トークン使用量を追跡
+        if self.track_tokens and self.token_tracker:
+            # 入力トークンの概算
+            estimated_input_tokens = len(prompt_text) // 4  # 大まかな推定
+            
+        response = self.llm.invoke(
             [HumanMessage(content=[{"type": "text", "text": prompt_text}])]
-        ).content
+        )
+        
+        # トークン使用量を記録
+        if self.track_tokens and self.token_tracker:
+            output_tokens = len(response.content) // 4  # 大まかな推定
+            self.token_tracker.track_usage("gpt-4.1-nano", estimated_input_tokens, output_tokens)
+            print(f"    {self.token_tracker.get_query_summary('gpt-4.1-nano', estimated_input_tokens, output_tokens)}")
+            
+        return response.content
 
     def display_referenced_documents(self, metadata_list, referenced_docs, show_content=False):
         """
@@ -220,16 +381,26 @@ class RAGChatBot:
         doc_info = {}
         # metadataとdocsを対応付けて処理
         for i, (metadata, doc) in enumerate(zip(metadata_list, referenced_docs)):
-            filename = metadata.get('filename', '不明なファイル')
-            page_number = metadata.get('page_number', '不明なページ')
-            doc_type = metadata.get('type', 'Text')
+            # ページ統合型処理に対応
+            if metadata.get('processing_type') == 'page_unified':
+                filename = metadata.get('title', '不明なファイル')
+                page_number = metadata.get('page_number', '不明なページ')
+                doc_type = metadata.get('content_type', 'page_unified')
+            else:
+                # 従来の処理との互換性
+                filename = metadata.get('filename', '不明なファイル')
+                page_number = metadata.get('page_number', '不明なページ')
+                doc_type = metadata.get('type', 'Text')
+            
             key = f"{filename}_page_{page_number}"
             if key not in doc_info:
                 doc_info[key] = {
                     'filename': filename,
                     'page_number': page_number,
                     'types': set(),
-                    'contents': set()  # 重複を避けるためsetを使用
+                    'contents': set(),  # 重複を避けるためsetを使用
+                    'theme': metadata.get('theme', ''),  # ページ統合型のテーマ情報
+                    'processing_type': metadata.get('processing_type', 'legacy')
                 }
             doc_info[key]['types'].add(doc_type)
             # RAGで参照したチャンクのテキストを取得
@@ -243,11 +414,20 @@ class RAGChatBot:
             sorted_docs = sorted(doc_info.values(), key=lambda x: (x['filename'], x['page_number']))
             for doc in sorted_docs:
                 types_str = ", ".join(sorted(doc['types']))
-                print(f"\n📄 {doc['filename']} (ページ {doc['page_number']}) - {types_str}")
+                
+                # ページ統合型処理の追加情報を表示
+                if doc['processing_type'] == 'page_unified':
+                    theme_info = f" | テーマ: {doc['theme']}" if doc['theme'] else ""
+                    print(f"\n📄 {doc['filename']} (ページ {doc['page_number']}) - {types_str}{theme_info}")
+                else:
+                    print(f"\n📄 {doc['filename']} (ページ {doc['page_number']}) - {types_str}")
+                
                 if show_content and doc['contents']:
                     for idx, content in enumerate(sorted(doc['contents'])):  # 順序を一定に
                         print(f"  [内容{idx+1}]:")
-                        print(f"  {content[:500]}{'...' if len(content)>500 else ''}")
+                        # ページ統合型の場合は少し多めに表示
+                        content_limit = 800 if doc['processing_type'] == 'page_unified' else 500
+                        print(f"  {content[:content_limit]}{'...' if len(content)>content_limit else ''}")
                         print("-" * 40)
             print("=" * 50)
 
@@ -256,9 +436,15 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--show-content', action='store_true', help='参照ドキュメントの内容も表示する')
+    parser.add_argument('--track-tokens', action='store_true', default=True, help='トークン使用量を追跡する（デフォルト: 有効）')
+    parser.add_argument('--no-track-tokens', action='store_true', help='トークン使用量追跡を無効にする')
     args = parser.parse_args()
+    
+    # トークン追跡の設定
+    track_tokens = args.track_tokens and not args.no_track_tokens
+    
     try:
-        chatbot = RAGChatBot(show_content=args.show_content)
+        chatbot = RAGChatBot(show_content=args.show_content, track_tokens=track_tokens)
         chatbot.main()
     except Exception as e:
         print(f"初期化エラー: {e}")
