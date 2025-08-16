@@ -12,13 +12,25 @@ from unstructured.partition.pdf import partition_pdf
 from google.cloud import documentai
 import pdf_chunking
 
-load_dotenv(dotenv_path="/home/fujikawa/jinshari/flask-bonsai/.env.local")
-# 環境変数の設定
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/home/fujikawa/.config/gcloud/application_default_credentials.json"
+# スクリプトファイルの位置を基準にパスを計算（カレントディレクトリに依存しない）
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+BACKEND_ROOT = os.path.join(SCRIPT_DIR, "..", "..")
+ENV_PATH = os.path.join(BACKEND_ROOT, ".env.local")
 
-FOLDER_PATH = "/home/fujikawa/jinshari/flask-bonsai/data/input/"
-PROCESSED_FILES_TXT = "/home/fujikawa/jinshari/flask-bonsai/data/processed_files.txt"
-VECTORSTORE_PATH = "/home/fujikawa/jinshari/flask-bonsai/data/vectorstore"
+load_dotenv(dotenv_path=ENV_PATH)
+
+# Google Cloud認証情報の設定（環境変数が設定されていない場合のデフォルト）
+if "GOOGLE_APPLICATION_CREDENTIALS" not in os.environ:
+    # デフォルトの認証情報パス（ユーザーのホームディレクトリ相対）
+    default_creds_path = os.path.expanduser("~/.config/gcloud/application_default_credentials.json")
+    if os.path.exists(default_creds_path):
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = default_creds_path
+    else:
+        print("警告: Google Cloud認証情報が見つかりません。GOOGLE_APPLICATION_CREDENTIALS環境変数を設定してください。")
+
+FOLDER_PATH = os.path.join(BACKEND_ROOT, "data", "input")
+PROCESSED_FILES_TXT = os.path.join(BACKEND_ROOT, "data", "processed_files.txt")
+VECTORSTORE_PATH = os.path.join(BACKEND_ROOT, "data", "vectorstore")
 
 
 class CreateVectorstore:
@@ -68,7 +80,7 @@ class CreateVectorstore:
         # DocumentAI documentを取得
         document = self.get_documentai_document(file)
         base_metadata = {
-            "source_file": FOLDER_PATH + file,
+            "source_file": os.path.join(FOLDER_PATH, file),
             "filename": file,
         }
         # チャンク抽出・結合
@@ -91,7 +103,7 @@ class CreateVectorstore:
         mime_type = "application/pdf"
         client = documentai.DocumentProcessorServiceClient()
         name = client.processor_version_path(project_id, location, processor_id, processor_version)
-        with open(FOLDER_PATH + file, "rb") as image:
+        with open(os.path.join(FOLDER_PATH, file), "rb") as image:
             image_content = image.read()
         request = documentai.ProcessRequest(
             name=name,

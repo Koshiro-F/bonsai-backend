@@ -63,7 +63,7 @@ def create_app(test_config=None):
         init_db()
 
     # Blueprintの登録
-    from .routes import bonsai, pesticide, recommend, user, other_settings, admin_master, work_log
+    from .routes import bonsai, pesticide, recommend, user, other_settings, admin_master, work_log, rag_shinpaku
     app.register_blueprint(bonsai.bp)
     app.register_blueprint(pesticide.bp)
     app.register_blueprint(recommend.bp)
@@ -71,6 +71,7 @@ def create_app(test_config=None):
     app.register_blueprint(other_settings.bp)
     app.register_blueprint(admin_master.bp)
     app.register_blueprint(work_log.bp)
+    app.register_blueprint(rag_shinpaku.bp)
 
     # デバッグ用：全エンドポイントの一覧表示（開発時のみ）
     if app.debug:

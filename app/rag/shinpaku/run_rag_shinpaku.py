@@ -1,4 +1,4 @@
-# ベクトルストアを使用したインタラクティブAIチャット
+# 真柏データベースを使用したインタラクティブAIチャット
 import json
 import os
 import time
@@ -14,16 +14,16 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 # スクリプトファイルの位置を基準にパスを計算（カレントディレクトリに依存しない）
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-BACKEND_ROOT = os.path.join(SCRIPT_DIR, "..", "..")
+BACKEND_ROOT = os.path.join(SCRIPT_DIR, "..", "..", "..")
 ENV_PATH = os.path.join(BACKEND_ROOT, ".env.local")
 
 load_dotenv(dotenv_path=ENV_PATH)
 
-TOP_K = 3
-BM25_K = 2  # BM25検索の取得数
-VECTOR_K = 2  # ベクトル検索の取得数
+TOP_K = 5  # 最終的な検索結果数
+BM25_K = 3  # BM25検索の取得数
+VECTOR_K = 3  # ベクトル検索の取得数
 
-VECTORSTORE_PATH = os.path.join(BACKEND_ROOT, "data", "vectorstore_page_unified")
+VECTORSTORE_PATH = os.path.join(BACKEND_ROOT, "data", "vectorstore_shinpaku")
 
 # OpenAI API料金設定（2024年1月現在）
 PRICING = {
@@ -97,7 +97,7 @@ class TokenTracker:
         return f"💰 {model}: {input_tokens}in + {output_tokens}out"
 
 
-class RAGChatBot:
+class RAGChatBotShinpaku:
     def __init__(self, show_content=False, track_tokens=True):
         print("ベクトルストアを読み込み中...")
         self.embeddings = OpenAIEmbeddings(
@@ -120,12 +120,24 @@ class RAGChatBot:
         self.vector_retriever = self.vectorstore.as_retriever(
             search_kwargs={"k": VECTOR_K}  # ベクトル検索の結果数を指定
         )
+        
+        # システムメッセージ
         self.system_message = (
             """あなたは盆栽の専門家です。以下に与えられた盆栽の専門文書のデータに基づいて、ユーザーの質問に対して回答を生成してください。
-            なるべく専門文書のデータに基づいて回答するようにし、不正確な部分があれば断定は避けてください。
-            推測に基づく回答をする場合は、その旨を伝えてください。"""
+            
+            【回答方針】
+            ・盆栽の専門用語や技法について正確に説明してください
+            ・専門文書に基づく回答を優先し、不正確な部分があれば断定は避けてください
+            ・推測に基づく回答をする場合は、その旨を明確に伝えてください
+            ・実践的なアドバイスを求められた場合は、安全性にも配慮してください
+            
+            【注意点】
+            ・専門文書のデータは盆栽雑誌から読み取ったものであるため、文章の構造が不自然な場合があります。
+            ・出力はできるだけ平文で行い、markdown形式は避けてください。"""
         )
-        self.llm = ChatOpenAI(model="gpt-4.1-nano")
+        
+        self.model = "gpt-4.1-nano"
+        self.llm = ChatOpenAI(model=self.model)
         
         # 会話履歴を保持
         self.chat_history = []
@@ -138,16 +150,54 @@ class RAGChatBot:
         print("チャットボットの準備が完了しました！")
         if track_tokens:
             print("💰 トークン使用量追跡: 有効")
+        
+        # データベース統計情報を表示
+        self.display_database_stats()
+
+    def display_database_stats(self):
+        """データベースの統計情報を表示"""
+        if not self.metadatas:
+            return
+        
+        print("\n" + "=" * 60)
+        print("📊 データベース統計情報")
+        print("=" * 60)
+        
+        total_docs = len(self.metadatas)
+        print(f"総ドキュメント数: {total_docs}")
+        
+        # 文献名の統計
+        文献名_set = set()
+        樹種_set = set()
+        章_set = set()
+        
+        for metadata in self.metadatas:
+            if metadata.get('文献名'):
+                文献名_set.add(metadata['文献名'])
+            if metadata.get('樹種') and metadata['樹種'].strip():
+                樹種_set.add(metadata['樹種'])
+            if metadata.get('章') and metadata['章'].strip():
+                章_set.add(metadata['章'])
+        
+        print(f"文献数: {len(文献名_set)}")
+        print(f"樹種数: {len(樹種_set)}")
+        print(f"章数: {len(章_set)}")
+        
+        if 樹種_set:
+            print(f"\n主な樹種: {', '.join(sorted(list(樹種_set))[:10])}")
+        
+        print("=" * 60)
 
     def main(self):
-        print("=" * 50)
-        print("ベクトルストアベースAIチャットボット")
-        print("=" * 50)
-        print("質問を入力してください。終了するには 'quit', 'exit', 'q' を入力してください。")
+        print("=" * 60)
+        print("真柏・盆栽専用AIチャットボット")
+        print("=" * 60)
+        print("真柏や盆栽に関する質問を入力してください。")
+        print("終了するには 'quit', 'exit', 'q' を入力してください。")
         print("履歴をクリアするには 'clear' を入力してください。")
         if self.track_tokens:
             print("トークン使用量を確認するには 'tokens' を入力してください。")
-        print("-" * 50)
+        print("-" * 60)
         print("参照ドキュメントの内容も表示する: {}".format("ON" if self.show_content else "OFF"))
         if self.track_tokens:
             print("トークン使用量追跡: ON")
@@ -175,7 +225,7 @@ class RAGChatBot:
                     print("質問を入力してください。")
                     continue
                 
-                print("\n検索中...")
+                print("\n🔍 検索中...")
                 response, metadata_list, referenced_docs = self.run_chat(user_input)
                 print(f"\nAI: {response}")
                 
@@ -197,7 +247,7 @@ class RAGChatBot:
                 print(f"\nエラーが発生しました: {e}")
                 continue
 
-    def run_chat(self, question: str) -> Tuple[str, list]:
+    def run_chat(self, question: str) -> Tuple[str, list, list]:
         """
         ユーザーの質問に対してRAGを使用して回答を生成する
         
@@ -205,7 +255,7 @@ class RAGChatBot:
             question (str): ユーザーの質問
             
         Returns:
-            Tuple[str, list]: 生成された回答と参照したドキュメントのメタデータ
+            Tuple[str, list, list]: 生成された回答、メタデータ、参照ドキュメント
         """
         result, metadata_list, referenced_docs = self.generate_output(
             self.keyword_retriever, 
@@ -216,6 +266,7 @@ class RAGChatBot:
         return result, metadata_list, referenced_docs
 
     def preprocess_func(self, text: str) -> List[str]:
+        """BM25用の前処理関数"""
         i, j = 3, 5
         if len(text) < i:
             return [text]
@@ -246,6 +297,7 @@ class RAGChatBot:
     def generate_output(
         self, keyword_retriever, vector_retriever, user_input, system_message
     ):
+        """RAG検索と回答生成"""
         question = self.regenerate_question(user_input)
         keyword_searched = keyword_retriever.invoke(question)
         
@@ -303,6 +355,7 @@ class RAGChatBot:
         prompt = ChatPromptTemplate.from_template(
             """
             次の会話履歴とフォローアップの質問を元に、フォローアップの質問を独立した質問として言い換えてください。
+            盆栽に関する専門的な文脈を考慮してください。
             ----------
             会話の履歴: {chat_history}
             ----------
@@ -326,12 +379,13 @@ class RAGChatBot:
         # トークン使用量を記録（推定値）
         if self.track_tokens and self.token_tracker:
             output_tokens = len(str(ans.content)) // 4  # 大まかな推定
-            self.token_tracker.track_usage("gpt-4.1-nano", estimated_input_tokens, output_tokens)
-            print(f"    {self.token_tracker.get_query_summary('gpt-4.1-nano', estimated_input_tokens, output_tokens)}")
+            self.token_tracker.track_usage(self.model, estimated_input_tokens, output_tokens)
+            print(f"    {self.token_tracker.get_query_summary(self.model, estimated_input_tokens, output_tokens)}")
             
         return str(ans.content)
 
     def chat_based_on_texts(self, texts_retrieved, question, system_message):
+        """検索結果を基にした回答生成"""
         texts = "\n\n".join(texts_retrieved)
         
         # 会話履歴を文字列形式に変換
@@ -343,10 +397,11 @@ class RAGChatBot:
             {system_message}
             ----------
             会話記録を元にユーザーとの会話のキャッチボールを成立させてください。
+            盆栽の専門知識を正確に伝え、実践的なアドバイスを提供してください。
             ----------
             会話記録: {history_str}
             ----------
-            専門文書: {texts}
+            専門文書からの参考情報: {texts}
             ----------
             質問: {question}
             """
@@ -363,14 +418,14 @@ class RAGChatBot:
         # トークン使用量を記録
         if self.track_tokens and self.token_tracker:
             output_tokens = len(response.content) // 4  # 大まかな推定
-            self.token_tracker.track_usage("gpt-4.1-nano", estimated_input_tokens, output_tokens)
-            print(f"    {self.token_tracker.get_query_summary('gpt-4.1-nano', estimated_input_tokens, output_tokens)}")
+            self.token_tracker.track_usage(self.model, estimated_input_tokens, output_tokens)
+            print(f"    {self.token_tracker.get_query_summary(self.model, estimated_input_tokens, output_tokens)}")
             
         return response.content
 
     def display_referenced_documents(self, metadata_list, referenced_docs, show_content=False):
         """
-        参照したドキュメントの情報を整理して表示する
+        参照したドキュメントの情報を整理して表示する（整備済みデータ用にカスタマイズ）
         Args:
             metadata_list (list): ドキュメントのメタデータリスト
             referenced_docs (list): 参照したドキュメントのリスト
@@ -378,74 +433,104 @@ class RAGChatBot:
         """
         if not metadata_list:
             return
+            
         doc_info = {}
+        
         # metadataとdocsを対応付けて処理
         for i, (metadata, doc) in enumerate(zip(metadata_list, referenced_docs)):
-            # ページ統合型処理に対応
-            if metadata.get('processing_type') == 'page_unified':
-                filename = metadata.get('title', '不明なファイル')
-                page_number = metadata.get('page_number', '不明なページ')
-                doc_type = metadata.get('content_type', 'page_unified')
-            else:
-                # 従来の処理との互換性
-                filename = metadata.get('filename', '不明なファイル')
-                page_number = metadata.get('page_number', '不明なページ')
-                doc_type = metadata.get('type', 'Text')
+            文献名 = metadata.get('文献名', '不明な文献')
+            ページ = metadata.get('ページ', '不明なページ')
+            章 = metadata.get('章', '')
+            節 = metadata.get('節', '')
+            樹種 = metadata.get('樹種', '')
+            区分 = metadata.get('区分', '')
+            row_number = metadata.get('row_number', '')
             
-            key = f"{filename}_page_{page_number}"
+            # キーの作成（文献名とページで識別）
+            key = f"{文献名}_page_{ページ}"
+            
             if key not in doc_info:
                 doc_info[key] = {
-                    'filename': filename,
-                    'page_number': page_number,
-                    'types': set(),
-                    'contents': set(),  # 重複を避けるためsetを使用
-                    'theme': metadata.get('theme', ''),  # ページ統合型のテーマ情報
-                    'processing_type': metadata.get('processing_type', 'legacy')
+                    '文献名': 文献名,
+                    'ページ': ページ,
+                    '章': 章,
+                    '節': 節,
+                    '樹種': set(),
+                    '区分': set(),
+                    'contents': set()  # 重複を避けるためsetを使用
                 }
-            doc_info[key]['types'].add(doc_type)
+            
+            # 樹種と区分の情報を追加
+            if 樹種 and 樹種.strip():
+                doc_info[key]['樹種'].add(樹種)
+            if 区分 and 区分.strip():
+                doc_info[key]['区分'].add(区分)
+                
             # RAGで参照したチャンクのテキストを取得
             if show_content:
                 doc_info[key]['contents'].add(doc.page_content)
 
         if doc_info:
-            print("\n" + "=" * 50)
-            print("📚 参照したドキュメント:")
-            print("=" * 50)
-            sorted_docs = sorted(doc_info.values(), key=lambda x: (x['filename'], x['page_number']))
+            print("\n" + "=" * 60)
+            print("📚 参照したデータ:")
+            print("=" * 60)
+            
+            # 文献名とページでソート
+            sorted_docs = sorted(doc_info.values(), key=lambda x: (x['文献名'], str(x['ページ'])))
+            
             for doc in sorted_docs:
-                types_str = ", ".join(sorted(doc['types']))
+                # 基本情報の表示
+                info_parts = [f"📄 {doc['文献名']}"]
+                if doc['ページ']:
+                    info_parts.append(f"ページ {doc['ページ']}")
                 
-                # ページ統合型処理の追加情報を表示
-                if doc['processing_type'] == 'page_unified':
-                    theme_info = f" | テーマ: {doc['theme']}" if doc['theme'] else ""
-                    print(f"\n📄 {doc['filename']} (ページ {doc['page_number']}) - {types_str}{theme_info}")
-                else:
-                    print(f"\n📄 {doc['filename']} (ページ {doc['page_number']}) - {types_str}")
+                print(f"\n{' '.join(info_parts)}")
                 
+                # 詳細情報の表示
+                details = []
+                if doc['章']:
+                    details.append(f"章: {doc['章']}")
+                if doc['節']:
+                    details.append(f"節: {doc['節']}")
+                if doc['樹種']:
+                    樹種_str = ", ".join(sorted(doc['樹種']))
+                    details.append(f"樹種: {樹種_str}")
+                if doc['区分']:
+                    区分_str = ", ".join(sorted(doc['区分']))
+                    details.append(f"区分: {区分_str}")
+                
+                if details:
+                    print(f"  {' | '.join(details)}")
+                
+                # コンテンツの表示
                 if show_content and doc['contents']:
+                    print("  📝 参照内容:")
                     for idx, content in enumerate(sorted(doc['contents'])):  # 順序を一定に
-                        print(f"  [内容{idx+1}]:")
-                        # ページ統合型の場合は少し多めに表示
-                        content_limit = 800 if doc['processing_type'] == 'page_unified' else 500
-                        print(f"  {content[:content_limit]}{'...' if len(content)>content_limit else ''}")
-                        print("-" * 40)
-            print("=" * 50)
+                        print(f"    [{idx+1}] {content[:300]}{'...' if len(content)>300 else ''}")
+                        if idx < len(doc['contents']) - 1:
+                            print("    " + "-" * 50)
+            
+            print("=" * 60)
 
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--show-content', action='store_true', help='参照ドキュメントの内容も表示する')
-    parser.add_argument('--track-tokens', action='store_true', default=True, help='トークン使用量を追跡する（デフォルト: 有効）')
-    parser.add_argument('--no-track-tokens', action='store_true', help='トークン使用量追跡を無効にする')
+    parser = argparse.ArgumentParser(description='盆栽専用RAGチャットボット')
+    parser.add_argument('--show-content', action='store_true', 
+                       help='参照ドキュメントの内容も表示する')
+    parser.add_argument('--track-tokens', action='store_true', default=True, 
+                       help='トークン使用量を追跡する（デフォルト: 有効）')
+    parser.add_argument('--no-track-tokens', action='store_true', 
+                       help='トークン使用量追跡を無効にする')
     args = parser.parse_args()
     
     # トークン追跡の設定
     track_tokens = args.track_tokens and not args.no_track_tokens
     
     try:
-        chatbot = RAGChatBot(show_content=args.show_content, track_tokens=track_tokens)
+        chatbot = RAGChatBotShinpaku(show_content=args.show_content, track_tokens=track_tokens)
         chatbot.main()
     except Exception as e:
         print(f"初期化エラー: {e}")
-        print("ベクトルストアが存在することを確認してください。")
+        print("整備済みデータのベクトルストアが存在することを確認してください。")
+        print("先に create_vectorstore_shinpaku.py を実行してください。")
